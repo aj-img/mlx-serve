@@ -1471,6 +1471,33 @@ fn maxTokensBudgetSqueezed(max_tokens: u32, remaining: u32) bool {
     return remaining < max_tokens / 4;
 }
 
+/// vLLM `ignore_eos`: when true, EOS and stop tokens do not end the reply —
+/// only `max_tokens` (or the request timeout) does. Stop sequences are a
+/// separate field and stay active.
+fn requestEosSlice(config: *const model_mod.ModelConfig, root: std.json.ObjectMap) []const u32 {
+    if (root.get("ignore_eos")) |v| {
+        if (v == .bool and v.bool) return &.{};
+    }
+    return config.eosTokenSlice();
+}
+
+test "requestEosSlice: ignore_eos swaps the EOS list for empty" {
+    var config = model_mod.ModelConfig{};
+    config.addEosToken(151645);
+    config.addEosToken(151643);
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const parsed_off = try std.json.parseFromSlice(std.json.Value, arena_state.allocator(), "{\"ignore_eos\": true}", .{});
+    defer parsed_off.deinit();
+    try std.testing.expectEqual(@as(usize, 0), requestEosSlice(&config, parsed_off.value.object).len);
+    const parsed_on = try std.json.parseFromSlice(std.json.Value, arena_state.allocator(), "{\"ignore_eos\": false}", .{});
+    defer parsed_on.deinit();
+    try std.testing.expectEqual(@as(usize, 2), requestEosSlice(&config, parsed_on.value.object).len);
+    const parsed_absent = try std.json.parseFromSlice(std.json.Value, arena_state.allocator(), "{\"max_tokens\": 64}", .{});
+    defer parsed_absent.deinit();
+    try std.testing.expectEqual(@as(usize, 2), requestEosSlice(&config, parsed_absent.value.object).len);
+}
+
 /// The auto budget's own tightness question: under a quarter of the window left.
 fn autoBudgetWindowTight(remaining: u32, effective_ctx: u32) bool {
     return remaining < effective_ctx / 4;
@@ -8937,7 +8964,7 @@ fn handleChatCompletions(
     // Prompt caching: reuse KV cache for shared prefix.
     // Force invalidation when images are present — image tokens have identical IDs
     // but different vision embeddings, so prefix matching would reuse stale features.
-    const eos_slice = config.eosTokenSlice();
+    const eos_slice = requestEosSlice(config, root);
 
     var sampling = generate_mod.SamplingParams{
         .temperature = temperature,
@@ -9198,7 +9225,7 @@ fn handleCompletions(
         // chat-completions site): MTP wins whenever loaded.
     }
 
-    const eos_slice = config.eosTokenSlice();
+    const eos_slice = requestEosSlice(config, root);
     const sampling = generate_mod.SamplingParams{
         .temperature = temperature,
         .top_p = top_p,
